@@ -1,4 +1,3 @@
-
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import mapValues from 'lodash.mapvalues';
