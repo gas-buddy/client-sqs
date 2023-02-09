@@ -1,5 +1,5 @@
-import type { BaseLogger } from 'pino';
-import { SQSClientConfig } from '@aws-sdk/client-sqs';
+import { ConsumerOptions } from 'sqs-consumer';
+import type { BaseLogger as pinoBaseLogger} from 'pino';
 
 export interface SQSQueueConfiguration {
   // The true name of the queue on the endpoint
@@ -14,23 +14,66 @@ export interface SQSQueueConfiguration {
   endpoint?: string;
 }
 
+export interface SubscriptionOptions {
+}
+
 export interface SQSEndpointConfiguration {
+  endpoint: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  sessionToken?: string;
   // AWS account id
   accountId?: string;
   // Role to verify when connecting to SQS. If you don't have this role,
   // the queue configuration will throw an exception
   requiredRole?: string;
-  config: SQSClientConfig;
+  config?: any;
 }
 
-export interface SQSClientConfiguration<Endpoints extends 'default'> {
+export interface Subscriptions {
+  waitTimeSeconds?: number;
+}
+
+export interface SQSClientConfiguration {
   // AWS region
   region?: string;
-  queues: SQSQueueConfiguration[];
+  queues: Record<string, SQSQueueConfiguration>;
   // Configure named endpoints to be assigned to queues
-  endpoints?: Record<Endpoints, SQSEndpointConfiguration>;
+  endpoints?: Record<string, SQSEndpointConfiguration>;
+  endpoint?: SQSEndpointConfiguration;
+  subscriptions: Subscriptions;
+  contextFunction?: any;
 }
 
 export interface SQSClientContext {
-  logger: BaseLogger;
+  logger: pinoBaseLogger;
+  headers?: any;
+  service: any;
 }
+
+export interface ConfiguredSQSClient {
+  // The configuration
+  config: any;
+  // The true name of the queue on the endpoint
+  assumedRole: string;
+  // How many readers to spin up when subscribing to this queue
+  readers?: number;
+  // An endpoint in the set of configured endpoints for this queue to use
+  endpoint?: string;
+  subscribe: Function;
+}
+
+export interface SqsQueueType {
+}
+
+export interface CallInfo {
+  operationName: string,
+  message: any;
+  error?: any;
+}
+
+export interface GbConsumerOptions extends ConsumerOptions {
+  readers?: number;
+}
+
+export type BaseLogger = pinoBaseLogger;
