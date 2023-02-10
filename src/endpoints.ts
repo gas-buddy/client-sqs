@@ -41,6 +41,9 @@ export async function buildEndpoints<Endpoints extends 'default', CTX extends SQ
     default: defaultConfig,
   };
   const needsLocalInfo = Object.values(epConfig).find((c) => !c.accountId || !c.config.region);
+  if (needsLocalInfo) {
+    context.logger.info('Fetching region for SQS configuration');
+  }
   const self = needsLocalInfo ? await getIdentityInfo() : undefined;
 
   const roles = Object.values(epConfig)
@@ -61,7 +64,10 @@ export async function buildEndpoints<Endpoints extends 'default', CTX extends SQ
     );
   }
   return mapValues(endpointConfig, ({ config, accountId }) => {
-    const sqs = new SQSClient(config);
+    const sqs = new SQSClient({
+      region: config.region || self?.region,
+      ...config,
+    });
     return {
       config,
       sqs,

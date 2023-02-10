@@ -30,8 +30,6 @@ export interface SQSEndpointConfiguration {
 }
 
 export interface SQSClientConfiguration<Q extends string, Endpoints extends 'default' = 'default'> {
-  // AWS region
-  region?: string;
   queues: Record<Q, SQSQueueConfiguration>;
   // Configure named endpoints to be assigned to queues
   endpoints?: Record<Endpoints, SQSEndpointConfiguration>;
