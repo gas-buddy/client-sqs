@@ -1,6 +1,7 @@
 import type { BaseLogger } from 'pino';
 import {
   Message,
+  ReceiveMessageCommandInput,
   SendMessageCommandInput,
   SendMessageCommandOutput,
   SQSClientConfig,
@@ -40,20 +41,29 @@ export interface SQSClientContext {
   logger: BaseLogger;
 }
 
-export interface SQSEnhancedQueue {
+export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContext> {
   name: string;
+  url: string;
+
   publish<T extends {}>(
     message: T,
     options?: SendMessageCommandInput,
   ): Promise<SendMessageCommandOutput>;
-  createConsumer<T extends {} = {}, CTX extends SQSClientContext = SQSClientContext>(
-    context: CTX,
+  createConsumer<T extends {} = {}>(
     handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
     options?: ConsumerOptions,
   ): Consumer;
+  receive<T extends {} = {}>(
+    options: Omit<ReceiveMessageCommandInput, 'QueueUrl'> & { noParse?: boolean },
+  ): Promise<{ message?: T; original: Message }[]>;
+  ack(message: Message): Promise<void>;
 }
 
-export interface SQSEnhancedQueueClient<Q extends string, Endpoints extends 'default'> {
-  queues: Record<Q, SQSEnhancedQueue>;
+export interface SQSEnhancedQueueClient<
+  Q extends string,
+  Endpoints extends 'default' = 'default',
+  CTX extends SQSClientContext = SQSClientContext,
+> {
+  queues: Record<Q, SQSEnhancedQueue<CTX>>;
   endpoints: Record<Endpoints, any>;
 }

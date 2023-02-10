@@ -8,8 +8,8 @@ import {
   SQSQueueConfiguration,
 } from './types/index';
 
-export async function createSQSClient<Q extends string, T extends 'default'>(
-  context: SQSClientContext,
+export async function createSQSClient<Q extends string, T extends 'default', CTX extends SQSClientContext = SQSClientContext>(
+  context: CTX,
   config: SQSClientConfiguration<Q, T>,
 ): Promise<SQSEnhancedQueueClient<Q, T>> {
   const endpoints = await buildEndpoints(context, config.endpoints!);

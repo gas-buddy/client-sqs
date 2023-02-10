@@ -33,8 +33,8 @@ const defaultConfig: SQSEndpointConfiguration = {
   config: {},
 };
 
-export async function buildEndpoints<Endpoints extends 'default'>(
-  context: SQSClientContext,
+export async function buildEndpoints<Endpoints extends 'default', CTX extends SQSClientContext = SQSClientContext>(
+  context: CTX,
   endpointConfig: Record<Endpoints, SQSEndpointConfiguration>,
 ) {
   const epConfig: Record<string, SQSEndpointConfiguration> = endpointConfig || {
