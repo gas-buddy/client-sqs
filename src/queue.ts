@@ -39,6 +39,7 @@ export async function getQueue(
     ) {
       const consumer = new Consumer({
         ...options,
+        region: ep.region,
         queueUrl: fullUrl,
         sqs: ep.sqs,
         async handleMessage(message) {
