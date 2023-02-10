@@ -1,9 +1,11 @@
 import type { BaseLogger } from 'pino';
 import {
+  Message,
   SendMessageCommandInput,
   SendMessageCommandOutput,
   SQSClientConfig,
 } from '@aws-sdk/client-sqs';
+import type { Consumer, ConsumerOptions } from 'sqs-consumer';
 
 export interface SQSQueueConfiguration {
   // The true name of the queue on the endpoint, else uses the name in the queue configuration
@@ -44,6 +46,11 @@ export interface SQSEnhancedQueue {
     message: T,
     options?: SendMessageCommandInput,
   ): Promise<SendMessageCommandOutput>;
+  createConsumer<T extends {} = {}, CTX extends SQSClientContext = SQSClientContext>(
+    context: CTX,
+    handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
+    options?: ConsumerOptions,
+  ): Consumer;
 }
 
 export interface SQSEnhancedQueueClient<Q extends string, Endpoints extends 'default'> {

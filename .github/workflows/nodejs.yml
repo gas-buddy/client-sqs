@@ -13,6 +13,18 @@ jobs:
     - uses: actions/setup-node@v3
       with:
         node-version: 18
+
+    - name: Start LocalStack
+      run: |
+        pip install localstack awscli-local # install LocalStack cli and awslocal
+        docker pull localstack/localstack         # Make sure to pull the latest version of the image
+        localstack start -d                       # Start LocalStack in the background
+
+        echo "Waiting for LocalStack startup..."  # Wait 30 seconds for the LocalStack container
+        localstack wait -t 30                     # to become ready before timing out
+        echo "Startup complete"
+        awslocal sqs create-queue --queue-name sample-queue
+
     - run: yarn install --immutable
     - run: yarn build
     - run: yarn lint
