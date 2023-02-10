@@ -8,11 +8,11 @@ const sqsHost = process.env.SQS_HOST || '127.0.0.1';
 const sqsPort = process.env.SQS_PORT || 4566;
 
 const qConfig: SQSClientConfiguration<'testQueue'> = {
-  region: 'us-east-1',
   endpoints: {
     default: {
       accountId: process.env.SQS_ACCOUNT_ID || '000000000000',
       config: {
+        region: 'us-east-1',
         endpoint: `http://${sqsHost}:${sqsPort}`,
         credentials: {
           accessKeyId: 'key',
@@ -57,7 +57,10 @@ describe('SQS Client', () => {
       signal = accept;
     }) as Promise<[typeof message, Message]>;
     const consumer = sqs.queues.testQueue.createConsumer<typeof message>((ctx, m, o) => {
-      signal([m, o]);
+      // Allow some overlap of test runs w/o failing.
+      if (m.foo === message.foo) {
+        signal([m, o]);
+      }
     });
     consumer.start();
 
