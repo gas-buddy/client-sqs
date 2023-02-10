@@ -1,7 +1,8 @@
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import mapValues from 'lodash.mapvalues';
-import { SQSClientConfiguration, SQSEndpointConfiguration } from './types/index';
+import { SQSClientContext, SQSEndpointConfiguration } from './types/index';
+import { RawSqsEndpoint } from './types/internal';
 
 let identityPromise: Promise<{ region: string; accountId: string }> | undefined;
 
@@ -33,7 +34,8 @@ const defaultConfig: SQSEndpointConfiguration = {
 };
 
 export async function buildEndpoints<Endpoints extends 'default'>(
-  endpointConfig: SQSClientConfiguration<Endpoints>['endpoints'],
+  context: SQSClientContext,
+  endpointConfig: Record<Endpoints, SQSEndpointConfiguration>,
 ) {
   const epConfig: Record<string, SQSEndpointConfiguration> = endpointConfig || {
     default: defaultConfig,
@@ -59,11 +61,12 @@ export async function buildEndpoints<Endpoints extends 'default'>(
     );
   }
   return mapValues(endpointConfig, ({ config, accountId }) => {
-    const awsContext = {
-      accountId: accountId || self!.region,
-      region: config.region || self!.region,
-    };
     const sqs = new SQSClient(config);
-    return { ...awsContext, sqs };
-  });
+    return {
+      config,
+      sqs,
+      accountId: accountId || self?.accountId,
+      region: config.region || self?.region,
+    };
+  }) as Record<Endpoints, RawSqsEndpoint>;
 }

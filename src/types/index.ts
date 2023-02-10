@@ -1,11 +1,14 @@
 import type { BaseLogger } from 'pino';
-import { SQSClientConfig } from '@aws-sdk/client-sqs';
+import {
+  SendMessageCommandInput,
+  SendMessageCommandOutput,
+  SQSClientConfig,
+} from '@aws-sdk/client-sqs';
 
 export interface SQSQueueConfiguration {
-  // The true name of the queue on the endpoint
-  name: string;
-  // If a different local name is desired, specify it here
-  logicalName?: string;
+  // The true name of the queue on the endpoint, else uses the name in the queue configuration
+  // dictionary
+  name?: string;
   // Identify a queue to receive rejected messages
   deadLetter?: string;
   // How many readers to spin up when subscribing to this queue
@@ -23,14 +26,27 @@ export interface SQSEndpointConfiguration {
   config: SQSClientConfig;
 }
 
-export interface SQSClientConfiguration<Endpoints extends 'default'> {
+export interface SQSClientConfiguration<Q extends string, Endpoints extends 'default' = 'default'> {
   // AWS region
   region?: string;
-  queues: SQSQueueConfiguration[];
+  queues: Record<Q, SQSQueueConfiguration>;
   // Configure named endpoints to be assigned to queues
   endpoints?: Record<Endpoints, SQSEndpointConfiguration>;
 }
 
 export interface SQSClientContext {
   logger: BaseLogger;
+}
+
+export interface SQSEnhancedQueue {
+  name: string;
+  publish<T extends {}>(
+    message: T,
+    options?: SendMessageCommandInput,
+  ): Promise<SendMessageCommandOutput>;
+}
+
+export interface SQSEnhancedQueueClient<Q extends string, Endpoints extends 'default'> {
+  queues: Record<Q, SQSEnhancedQueue>;
+  endpoints: Record<Endpoints, any>;
 }
