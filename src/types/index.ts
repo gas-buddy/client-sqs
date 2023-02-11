@@ -1,11 +1,17 @@
 import type { BaseLogger } from 'pino';
-import { SQSClientConfig } from '@aws-sdk/client-sqs';
+import {
+  Message,
+  ReceiveMessageCommandInput,
+  SendMessageCommandInput,
+  SendMessageCommandOutput,
+  SQSClientConfig,
+} from '@aws-sdk/client-sqs';
+import type { Consumer, ConsumerOptions } from 'sqs-consumer';
 
 export interface SQSQueueConfiguration {
-  // The true name of the queue on the endpoint
-  name: string;
-  // If a different local name is desired, specify it here
-  logicalName?: string;
+  // The true name of the queue on the endpoint, else uses the name in the queue configuration
+  // dictionary
+  name?: string;
   // Identify a queue to receive rejected messages
   deadLetter?: string;
   // How many readers to spin up when subscribing to this queue
@@ -23,14 +29,39 @@ export interface SQSEndpointConfiguration {
   config: SQSClientConfig;
 }
 
-export interface SQSClientConfiguration<Endpoints extends 'default'> {
-  // AWS region
-  region?: string;
-  queues: SQSQueueConfiguration[];
+export interface SQSClientConfiguration<Q extends string, Endpoints extends 'default' = 'default'> {
+  queues: Record<Q, SQSQueueConfiguration>;
   // Configure named endpoints to be assigned to queues
   endpoints?: Record<Endpoints, SQSEndpointConfiguration>;
 }
 
 export interface SQSClientContext {
   logger: BaseLogger;
+}
+
+export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContext> {
+  name: string;
+  url: string;
+
+  publish<T extends {}>(
+    message: T,
+    options?: SendMessageCommandInput,
+  ): Promise<SendMessageCommandOutput>;
+  createConsumer<T extends {} = {}>(
+    handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
+    options?: ConsumerOptions,
+  ): Consumer;
+  receive<T extends {} = {}>(
+    options: Omit<ReceiveMessageCommandInput, 'QueueUrl'> & { noParse?: boolean },
+  ): Promise<{ message?: T; original: Message }[]>;
+  ack(message: Message): Promise<void>;
+}
+
+export interface SQSEnhancedQueueClient<
+  Q extends string,
+  Endpoints extends 'default' = 'default',
+  CTX extends SQSClientContext = SQSClientContext,
+> {
+  queues: Record<Q, SQSEnhancedQueue<CTX>>;
+  endpoints: Record<Endpoints, any>;
 }

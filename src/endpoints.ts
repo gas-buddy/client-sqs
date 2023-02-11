@@ -1,7 +1,8 @@
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import mapValues from 'lodash.mapvalues';
-import { SQSClientConfiguration, SQSEndpointConfiguration } from './types/index';
+import { SQSClientContext, SQSEndpointConfiguration } from './types/index';
+import { RawSqsEndpoint } from './types/internal';
 
 let identityPromise: Promise<{ region: string; accountId: string }> | undefined;
 
@@ -32,13 +33,17 @@ const defaultConfig: SQSEndpointConfiguration = {
   config: {},
 };
 
-export async function buildEndpoints<Endpoints extends 'default'>(
-  endpointConfig: SQSClientConfiguration<Endpoints>['endpoints'],
+export async function buildEndpoints<Endpoints extends 'default', CTX extends SQSClientContext = SQSClientContext>(
+  context: CTX,
+  endpointConfig: Record<Endpoints, SQSEndpointConfiguration>,
 ) {
   const epConfig: Record<string, SQSEndpointConfiguration> = endpointConfig || {
     default: defaultConfig,
   };
   const needsLocalInfo = Object.values(epConfig).find((c) => !c.accountId || !c.config.region);
+  if (needsLocalInfo) {
+    context.logger.info('Fetching region for SQS configuration');
+  }
   const self = needsLocalInfo ? await getIdentityInfo() : undefined;
 
   const roles = Object.values(epConfig)
@@ -59,11 +64,15 @@ export async function buildEndpoints<Endpoints extends 'default'>(
     );
   }
   return mapValues(endpointConfig, ({ config, accountId }) => {
-    const awsContext = {
-      accountId: accountId || self!.region,
-      region: config.region || self!.region,
+    const sqs = new SQSClient({
+      region: config.region || self?.region,
+      ...config,
+    });
+    return {
+      config,
+      sqs,
+      accountId: accountId || self?.accountId,
+      region: config.region || self?.region,
     };
-    const sqs = new SQSClient(config);
-    return { ...awsContext, sqs };
-  });
+  }) as Record<Endpoints, RawSqsEndpoint>;
 }
