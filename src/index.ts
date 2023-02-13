@@ -25,3 +25,5 @@ export async function createSQSClient<Q extends string, T extends 'default', CTX
     endpoints,
   };
 }
+
+export * from './types/index';
