@@ -16,11 +16,17 @@ export async function getQueue(
   config: SQSQueueConfiguration,
 ): Promise<SQSEnhancedQueue> {
   const name = config.name || localName;
-  const { endpoint } = config;
+  const { endpoint, deadLetter } = config;
 
   const ep = endpoints[endpoint || 'default'];
   const qurl = (ep.config.endpoint as string) || `http://${ep.region}.queue.amazonaws.com`;
   const fullUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${name}`;
+
+  const dlq = deadLetter && endpoints[deadLetter];
+  const dlqUrl = dlq ? (ep.config.endpoint as string) || `http://${ep.region}.queue.amazonaws.com` : undefined;
+  const dlqFullUrl = config.deadLetter && dlqUrl
+    ? `${dlqUrl}${dlqUrl.endsWith('/') ? '' : '/'}${ep.accountId}/${config.deadLetter}`
+    : undefined;
 
   return {
     name: localName,
@@ -62,8 +68,19 @@ export async function getQueue(
                   error,
                   'SQS deadLetter error, but no deadLetter queue configured',
                 );
+              } else {
+                const command = new SendMessageCommand({
+                  MessageAttributes: {
+                    Error: {
+                      DataType: 'String',
+                      StringValue: (error as any).message || 'Unknown error',
+                    },
+                  },
+                  QueueUrl: dlqFullUrl!,
+                  MessageBody: JSON.stringify(message),
+                });
+                (dlq as RawSqsEndpoint).sqs.send(command);
               }
-              // TODO dead letter handling
             }
             context.logger.error(error, 'SQS Consumer handler error');
             throw error;
