@@ -14,14 +14,27 @@ export async function createSQSClient<Q extends string, T extends 'default', CTX
 ): Promise<SQSEnhancedQueueClient<Q, T>> {
   const endpoints = await buildEndpoints(context, config.endpoints!);
   const all = Object.entries(config.queues);
+
+  // Mutable reference populated after all queues are built. Consumer closures
+  // execute at message-processing time (after createSQSClient returns), so the
+  // map is fully populated by the time any handler runs.
+  const allQueues: Record<string, SQSEnhancedQueue> = {};
+
   const queues = await Promise.all(
-    all.map(([name, q]) => getQueue(context, endpoints, name, q as SQSQueueConfiguration)),
+    // eslint-disable-next-line max-len
+    all.map(([name, q]) => getQueue(context, endpoints, name, q as SQSQueueConfiguration, allQueues)),
   );
+
+  const queuesMap = queues.reduce((acc, q) => {
+    acc[q.name] = q;
+    return acc;
+  }, {} as Record<string, SQSEnhancedQueue>);
+
+  // Populate the shared reference so DLQ routing can look up sibling queues
+  Object.assign(allQueues, queuesMap);
+
   return {
-    queues: queues.reduce((acc, q) => {
-      acc[q.name] = q;
-      return acc;
-    }, {} as Record<string, SQSEnhancedQueue>),
+    queues: queuesMap,
     endpoints,
   };
 }

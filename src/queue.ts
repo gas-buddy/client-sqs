@@ -14,6 +14,7 @@ export async function getQueue(
   endpoints: Record<string, RawSqsEndpoint>,
   localName: string,
   config: SQSQueueConfiguration,
+  allQueues: Record<string, SQSEnhancedQueue>,
 ): Promise<SQSEnhancedQueue> {
   const name = config.name || localName;
   const { endpoint } = config;
@@ -55,17 +56,40 @@ export async function getQueue(
             // Returning message causes sqs-consumer to delete (ack) it
             return message;
           } catch (error) {
-            if ((error as any).deadLetter) {
-              if (!config.deadLetter) {
+            const err = error as any;
+            if (err.deadLetter) {
+              const dlqName: string | undefined = err.deadLetter === true
+                ? config.deadLetter : err.deadLetter;
+              if (!dlqName || !allQueues[dlqName]) {
                 context.logger.error(
-                  error,
+                  err,
                   'SQS deadLetter error, but no deadLetter queue configured',
                 );
+              } else {
+                try {
+                  // Forward the raw body and original attributes, adding ErrorDetail
+                  const dlqCommand = new SendMessageCommand({
+                    QueueUrl: allQueues[dlqName].url,
+                    MessageBody: message.Body!,
+                    MessageAttributes: {
+                      ...message.MessageAttributes,
+                      ErrorDetail: {
+                        DataType: 'String',
+                        StringValue: String(err.message ?? err),
+                      },
+                    },
+                  });
+                  await ep.sqs.send(dlqCommand);
+                  // ACK original by returning message
+                  return message;
+                } catch (sqsError) {
+                  context.logger.error(sqsError, 'Failed to publish to configured DLQ');
+                  throw sqsError;
+                }
               }
-              // TODO dead letter handling
             }
-            context.logger.error(error, 'SQS Consumer handler error');
-            throw error;
+            context.logger.error(err, 'SQS Consumer handler error');
+            throw err;
           }
         },
       });
