@@ -30,8 +30,7 @@ const client = await createSQSClient(
       },
     },
     queues: {
-      orders: { name: 'orders-queue' },
-      ordersDlq: { name: 'orders-dlq' },
+      orders: { name: 'orders-queue', deadLetter: 'orders-dlq' },
     },
   },
 );
@@ -101,14 +100,16 @@ The library always requests `CorrelationId`, `ErrorDetail`, and all SQS system a
 
 ## Dead Letter Queues
 
-Configure a `deadLetter` key on a queue to enable DLQ routing:
+Configure a `deadLetter` key on a queue with the **SQS queue name** to enable DLQ routing.
+No separate entry in `queues` is needed — the DLQ URL is built automatically using the same
+endpoint as the source queue:
 
 ```typescript
 const client = await createSQSClient(ctx, {
   endpoints: { default: { ... } },
   queues: {
-    payments: { name: 'payments-queue', deadLetter: 'paymentsDlq' },
-    paymentsDlq: { name: 'payments-dlq' },
+    payments: { name: 'payments-queue', deadLetter: 'payments-dlq' },
+    // No separate DLQ entry needed — 'payments-dlq' is the SQS queue name, not a config key
   },
 });
 ```
@@ -138,11 +139,11 @@ const consumer = client.queues.payments.createConsumer(async (ctx, message) => {
 });
 ```
 
-**Pattern 3: Throw with a specific DLQ queue name** — override the configured DLQ:
+**Pattern 3: Throw with a specific SQS queue name** — override the configured DLQ:
 
 ```typescript
 const err = new Error('Route to audit queue');
-(err as any).deadLetter = 'auditQueue'; // logical queue name in config
+(err as any).deadLetter = 'payments-audit-dlq'; // SQS queue name (not a config key)
 throw err;
 ```
 
@@ -203,7 +204,7 @@ interface SQSClientConfiguration<Q extends string, Endpoints extends 'default'> 
 
 interface SQSQueueConfiguration {
   name?: string;       // SQS queue name (defaults to the config key)
-  deadLetter?: string; // logical key of the DLQ queue in the same config
+  deadLetter?: string; // SQS queue name of the DLQ (no separate config entry required)
   endpoint?: string;   // named endpoint for this queue (defaults to 'default')
 }
 

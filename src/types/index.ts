@@ -12,7 +12,7 @@ export interface SQSQueueConfiguration {
   // The true name of the queue on the endpoint, else uses the name in the queue configuration
   // dictionary
   name?: string;
-  // Identify a queue to receive rejected messages
+  // Identify a queue to receive rejected messages (SQS queue name, not a config key)
   deadLetter?: string;
   // How many readers to spin up when subscribing to this queue
   readers?: number;
