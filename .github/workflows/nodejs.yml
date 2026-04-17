@@ -21,6 +21,7 @@ jobs:
       uses: LocalStack/setup-localstack@v0.2.2
       with:
         image-tag: 'latest'
+        use-pro: 'false'
         install-awslocal: 'true'
 
     - name: Create test queue
