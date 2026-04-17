@@ -18,20 +18,15 @@ jobs:
         node-version-file: .nvmrc
 
     - name: Start LocalStack
-      run: |
-        pip install awscli-local
-        docker run -d --name localstack \
-          -p 4566:4566 \
-          -e SERVICES=sqs \
-          localstack/localstack:latest
+      uses: LocalStack/setup-localstack@v0.2.2
+      with:
+        image-tag: 'latest'
+        install-awslocal: 'true'
 
-        echo "Waiting for LocalStack startup..."
-        timeout 30 bash -c 'until curl -sf http://localhost:4566/_localstack/health; do sleep 1; done'
-        echo "Startup complete"
-        awslocal sqs create-queue --queue-name sample-queue
+    - name: Create test queue
+      run: awslocal sqs create-queue --queue-name sample-queue
 
     - run: yarn install --immutable
     - run: yarn build
     - run: yarn lint
     - run: yarn test
-
