@@ -43,17 +43,16 @@ export async function getQueue(
         queueUrl: fullUrl,
         sqs: ep.sqs,
         async handleMessage(message) {
+          let parsed: T;
           try {
-            let parsed: T | undefined;
-            try {
-              parsed = JSON.parse(message.Body!) as T;
-            } catch (e) {
-              context.logger.error(e, 'Invalid JSON in SQS message');
-            }
-            if (parsed) {
-              await handler(context, parsed, message);
-            }
-            // This is what causes it to ack the message
+            parsed = JSON.parse(message.Body!) as T;
+          } catch (e) {
+            context.logger.error(e, 'Invalid JSON in SQS message');
+            throw e;
+          }
+          try {
+            await handler(context, parsed, message);
+            // Returning message causes sqs-consumer to delete (ack) it
             return message;
           } catch (error) {
             if ((error as any).deadLetter) {
