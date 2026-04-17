@@ -8,6 +8,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    services:
+      localstack:
+        image: localstack/localstack:latest
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: sqs
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
     - uses: actions/checkout@v4
       with:
@@ -17,12 +30,8 @@ jobs:
       with:
         node-version-file: .nvmrc
 
-    - name: Start LocalStack
-      uses: LocalStack/setup-localstack@v0.2.2
-      with:
-        image-tag: 'latest'
-        use-pro: 'false'
-        install-awslocal: 'true'
+    - name: Install awslocal
+      run: pip install awscli-local
 
     - name: Create test queue
       run: awslocal sqs create-queue --queue-name sample-queue
