@@ -55,6 +55,12 @@ export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContex
     options: Omit<ReceiveMessageCommandInput, 'QueueUrl'> & { noParse?: boolean },
   ): Promise<{ message?: T; original: Message }[]>;
   ack(message: Message): Promise<void>;
+  /**
+   * Throw a dead-letter error. The message will be routed to the configured
+   * `deadLetter` queue with the reason set as the `ErrorDetail` attribute.
+   * Equivalent to: `throw Object.assign(new Error(reason), { deadLetter: true })`
+   */
+  reject(reason: string): never;
 }
 
 export interface SQSEnhancedQueueClient<

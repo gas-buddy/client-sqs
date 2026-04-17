@@ -145,5 +145,10 @@ export async function getQueue(
       });
       await ep.sqs.send(command);
     },
+    reject(reason: string): never {
+      const e = new Error(reason);
+      (e as any).deadLetter = true;
+      throw e;
+    },
   };
 }
