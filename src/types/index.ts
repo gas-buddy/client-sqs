@@ -49,7 +49,7 @@ export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContex
   ): Promise<SendMessageCommandOutput>;
   createConsumer<T extends {} = {}>(
     handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
-    options?: ConsumerOptions,
+    options?: Omit<ConsumerOptions, 'queueUrl'>,
   ): Consumer;
   receive<T extends {} = {}>(
     options: Omit<ReceiveMessageCommandInput, 'QueueUrl'> & { noParse?: boolean },

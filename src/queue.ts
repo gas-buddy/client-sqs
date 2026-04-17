@@ -36,13 +36,18 @@ export async function getQueue(
     },
     createConsumer<T extends {}>(
       handler: (context: SQSClientContext, message: T, original: Message) => Promise<void> | void,
-      options: ConsumerOptions,
+      options: Omit<ConsumerOptions, 'queueUrl'> = {},
     ) {
+      const { messageAttributeNames: callerAttrs = [], ...restOptions } = options;
       const consumer = new Consumer({
-        ...options,
+        ...restOptions,
         region: ep.region,
         queueUrl: fullUrl,
         sqs: ep.sqs,
+        // Request CorrelationId, ErrorDetail, and any caller-specified attributes.
+        // attributeNames: ['All'] fetches SQS system attributes (ApproximateReceiveCount, etc.)
+        messageAttributeNames: ['CorrelationId', 'ErrorDetail', ...callerAttrs],
+        attributeNames: ['All'],
         async handleMessage(message) {
           let parsed: T;
           try {
