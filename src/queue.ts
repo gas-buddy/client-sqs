@@ -26,6 +26,11 @@ export async function getQueue(
   return {
     name: localName,
     url: fullUrl,
+    /**
+     * Publish a message to this queue.
+     * Pass `MessageAttributes` in options to forward metadata (e.g. CorrelationId) — the library
+     * does NOT auto-generate or inject a CorrelationId. That is the caller's responsibility.
+     */
     async publish<T extends {}>(message: T, options?: Partial<SendMessageCommandInput>) {
       const command = new SendMessageCommand({
         ...options,

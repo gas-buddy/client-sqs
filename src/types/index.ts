@@ -45,7 +45,7 @@ export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContex
 
   publish<T extends {}>(
     message: T,
-    options?: SendMessageCommandInput,
+    options?: Partial<SendMessageCommandInput>,
   ): Promise<SendMessageCommandOutput>;
   createConsumer<T extends {} = {}>(
     handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
