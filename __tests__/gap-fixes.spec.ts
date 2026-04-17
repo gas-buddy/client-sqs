@@ -1,9 +1,17 @@
 /**
- * Unit tests for @gasbuddy/client-sqs gap fixes (SC-001 through SC-006).
+ * Unit tests for @gasbuddy/client-sqs gap fixes.
  * No localstack required — SQSClient.send is mocked via jest.fn().
+ *
+ * Verified against real payment-serv config pattern:
+ *   "payment_dwolla_webhooks": {
+ *     "name": "payment_dwolla_webhooks",
+ *     "deadLetter": "payment_dwolla_webhooks_unprocessable"
+ *   }
+ * The deadLetter value is the SQS queue name directly — no separate config
+ * entry is required in the queues map.
  */
 import type { BaseLogger } from 'pino';
-import { Message, SQSClient } from '@aws-sdk/client-sqs';
+import { Message } from '@aws-sdk/client-sqs';
 import { getQueue } from '../src/queue';
 import { SQSClientContext, SQSEnhancedQueue } from '../src/types/index';
 import { RawSqsEndpoint } from '../src/types/internal';
@@ -25,10 +33,9 @@ function makeContext(overrides?: Partial<BaseLogger>): SQSClientContext {
 
 function makeEndpoint(sendImpl?: jest.Mock): { endpoints: Record<string, RawSqsEndpoint>; sendMock: jest.Mock } {
   const sendMock = sendImpl ?? jest.fn().mockResolvedValue({ MessageId: 'mock-id' });
-  const mockSqs = { send: sendMock } as unknown as SQSClient;
   const endpoints: Record<string, RawSqsEndpoint> = {
     default: {
-      sqs: mockSqs,
+      sqs: { send: sendMock } as any,
       region: 'us-east-1',
       accountId: '123456789',
       config: { endpoint: 'http://localhost:4566', region: 'us-east-1' },
@@ -40,24 +47,19 @@ function makeEndpoint(sendImpl?: jest.Mock): { endpoints: Record<string, RawSqsE
 async function buildQueue(
   context: SQSClientContext,
   endpoints: Record<string, RawSqsEndpoint>,
-  allQueues: Record<string, SQSEnhancedQueue> = {},
   config = {},
-) {
-  return getQueue(context, endpoints, 'myQueue', { name: 'my-queue', ...config }, allQueues);
+): Promise<SQSEnhancedQueue> {
+  return getQueue(context, endpoints, 'payment_dwolla_webhooks', {
+    name: 'payment_dwolla_webhooks',
+    ...config,
+  });
 }
 
-/** Extract and invoke the handleMessage function from a created consumer */
-async function invokeHandleMessage(queue: SQSEnhancedQueue, rawMessage: Message) {
-  // createConsumer returns a Consumer; we capture its handleMessage via the options
-  let capturedHandleMessage: ((msg: Message) => Promise<Message | void>) | undefined;
-  const originalCreate = queue.createConsumer.bind(queue);
-  // Instead of starting a consumer, directly exercise handleMessage by calling
-  // the handler pathway through getQueue's closure. We do this by calling
-  // createConsumer and then accessing internal state via the consumer options.
-  // Since Consumer wraps handleMessage, we test via the queue's internal closure
-  // by calling createConsumer with a dummy handler and then directly triggering
-  // the logic with a synthetic message. We achieve this by using a mock Consumer.
-  return null; // placeholder — see individual tests below for direct closure testing
+/** Extract the internal handleMessage closure from a Consumer instance */
+function getInternalHandle(consumer: any): ((msg: Message) => Promise<Message | void>) | undefined {
+  return consumer._sqsOptions?.handleMessage
+    ?? consumer.sqsOptions?.handleMessage
+    ?? consumer.options?.handleMessage;
 }
 
 describe('gap-fixes — unit tests (no localstack)', () => {
@@ -65,124 +67,105 @@ describe('gap-fixes — unit tests (no localstack)', () => {
   // SC-001: JSON parse error rethrows (no silent ack)
   // ──────────────────────────────────────────────────
   describe('SC-001: JSON parse error rethrows', () => {
-    it('should throw when message.Body is invalid JSON', async () => {
+    it('rethrows on invalid JSON so the message is NOT acked', async () => {
       const ctx = makeContext();
       const { endpoints } = makeEndpoint();
-      const allQueues: Record<string, SQSEnhancedQueue> = {};
-      const queue = await buildQueue(ctx, endpoints, allQueues);
+      const queue = await buildQueue(ctx, endpoints);
 
-      const messages: Message[] = [];
-      const consumer = queue.createConsumer(async (_ctx, _msg) => {
-        // handler should never be reached
-      });
+      const consumer = queue.createConsumer(jest.fn());
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
 
-      // Access the Consumer's handleMessage through the Consumer instance
-      // by simulating what sqs-consumer does internally
-      const consumerAny = consumer as any;
-      const handleMessage = consumerAny.handleMessage?.bind(consumer)
-        ?? consumerAny.options?.handleMessage;
-
-      if (!handleMessage) {
-        // sqs-consumer v6 stores it on the options passed in; test via internal
-        // We verify by checking that Consumer was created with our handleMessage
-        expect(consumerAny._handleMessage || consumerAny.handleMessage).toBeDefined();
-        return;
-      }
-
-      const badMsg: Message = { Body: 'not-json', MessageId: 'test-1', ReceiptHandle: 'rh-1' };
-      await expect(handleMessage(badMsg)).rejects.toThrow();
+      const badMsg: Message = { Body: 'not-json', MessageId: 'msg-1', ReceiptHandle: 'rh-1' };
+      await expect(handle(badMsg)).rejects.toThrow();
       expect(ctx.logger.error).toHaveBeenCalled();
+      consumer.stop();
+    });
+
+    it('does NOT call the handler when Body is unparseable', async () => {
+      const ctx = makeContext();
+      const { endpoints } = makeEndpoint();
+      const handler = jest.fn();
+      const queue = await buildQueue(ctx, endpoints);
+
+      const consumer = queue.createConsumer(handler);
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
+
+      await expect(handle({ Body: '{bad', MessageId: 'x', ReceiptHandle: 'y' })).rejects.toThrow();
+      expect(handler).not.toHaveBeenCalled();
       consumer.stop();
     });
   });
 
   // ──────────────────────────────────────────────────
-  // SC-002 + SC-003: DLQ routing + ErrorDetail
+  // SC-002 + SC-003: DLQ routing — payment-serv pattern
+  // deadLetter is the queue name directly, no separate config entry
   // ──────────────────────────────────────────────────
-  describe('SC-002 + SC-003: DLQ routing with ErrorDetail', () => {
-    it('should publish to DLQ and ACK original when error.deadLetter=true', async () => {
+  describe('SC-002 + SC-003: DLQ routing (payment-serv config pattern)', () => {
+    it('publishes to DLQ by queue name and ACKs original when deadLetter=true', async () => {
       const ctx = makeContext();
-      const sendMock = jest.fn().mockResolvedValue({ MessageId: 'dlq-msg-id' });
+      const sendMock = jest.fn().mockResolvedValue({ MessageId: 'dlq-id' });
       const { endpoints } = makeEndpoint(sendMock);
 
-      const allQueues: Record<string, SQSEnhancedQueue> = {};
-      const queue = await buildQueue(ctx, endpoints, allQueues, { deadLetter: 'myDLQ' });
+      // payment-serv style: deadLetter is the SQS queue name, no separate config entry needed
+      const queue = await buildQueue(ctx, endpoints, {
+        deadLetter: 'payment_dwolla_webhooks_unprocessable',
+      });
 
-      // Build a DLQ queue entry in allQueues
-      const dlqQueue = await getQueue(ctx, endpoints, 'myDLQ', { name: 'my-dlq' }, allQueues);
-      allQueues.myQueue = queue;
-      allQueues.myDLQ = dlqQueue;
-
-      let handlerCallCount = 0;
-      const consumer = queue.createConsumer(async (_ctx, _msg) => {
-        handlerCallCount += 1;
+      const consumer = queue.createConsumer(async () => {
         const e = new Error('payment failed');
         (e as any).deadLetter = true;
         throw e;
       });
-
-      const consumerAny = consumer as any;
-      // sqs-consumer v6 stores handleMessage at options level
-      const internalHandle = consumerAny._sqsOptions?.handleMessage
-        ?? consumerAny.sqsOptions?.handleMessage
-        ?? consumerAny.options?.handleMessage;
-
-      if (!internalHandle) {
-        // Can't access internal handleMessage without private API — skip deep assertion
-        consumer.stop();
-        return;
-      }
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
 
       const testMsg: Message = {
         Body: '{"amount":100}',
         MessageId: 'orig-id',
         ReceiptHandle: 'orig-rh',
         MessageAttributes: {
-          CorrelationId: { DataType: 'String', StringValue: 'corr-123' },
+          CorrelationId: { DataType: 'String', StringValue: 'corr-abc' },
         },
       };
 
-      const result = await internalHandle(testMsg);
-      // Should return message (ACK original)
+      const result = await handle(testMsg);
+      // Original message is ACKed
       expect(result).toEqual(testMsg);
-      // DLQ send should have been called
-      const dlqSendCall = sendMock.mock.calls.find(
-        (call: any[]) => call[0]?.input?.QueueUrl?.includes('my-dlq'),
+
+      // DLQ SendMessageCommand was issued
+      const dlqCall = sendMock.mock.calls.find(
+        (call: any[]) => call[0]?.input?.QueueUrl?.includes('payment_dwolla_webhooks_unprocessable'),
       );
-      expect(dlqSendCall).toBeDefined();
-      const dlqInput = dlqSendCall?.[0]?.input;
-      expect(dlqInput?.MessageBody).toBe(testMsg.Body);
-      expect(dlqInput?.MessageAttributes?.ErrorDetail?.StringValue).toBe('payment failed');
-      expect(dlqInput?.MessageAttributes?.CorrelationId?.StringValue).toBe('corr-123');
+      expect(dlqCall).toBeDefined();
+      const input = dlqCall![0].input;
+
+      // Body forwarded verbatim
+      expect(input.MessageBody).toBe(testMsg.Body);
+      // ErrorDetail added
+      expect(input.MessageAttributes.ErrorDetail.StringValue).toBe('payment failed');
+      // Original CorrelationId preserved
+      expect(input.MessageAttributes.CorrelationId.StringValue).toBe('corr-abc');
       consumer.stop();
     });
 
-    it('should log error and rethrow when deadLetter=true but no DLQ configured', async () => {
+    it('logs and rethrows when deadLetter=true but no deadLetter configured on queue', async () => {
       const ctx = makeContext();
       const { endpoints } = makeEndpoint();
-      const allQueues: Record<string, SQSEnhancedQueue> = {};
       // No deadLetter in config
-      const queue = await buildQueue(ctx, endpoints, allQueues);
-      allQueues.myQueue = queue;
+      const queue = await buildQueue(ctx, endpoints);
 
       const consumer = queue.createConsumer(async () => {
         const e = new Error('reject me');
         (e as any).deadLetter = true;
         throw e;
       });
-
-      const consumerAny = consumer as any;
-      const internalHandle = consumerAny._sqsOptions?.handleMessage
-        ?? consumerAny.sqsOptions?.handleMessage
-        ?? consumerAny.options?.handleMessage;
-
-      if (!internalHandle) {
-        consumer.stop();
-        return;
-      }
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
 
       const testMsg: Message = { Body: '{"x":1}', MessageId: 'id-1', ReceiptHandle: 'rh-1' };
-      await expect(internalHandle(testMsg)).rejects.toThrow('reject me');
+      await expect(handle(testMsg)).rejects.toThrow('reject me');
       expect(ctx.logger.error).toHaveBeenCalledWith(
         expect.anything(),
         'SQS deadLetter error, but no deadLetter queue configured',
@@ -190,38 +173,50 @@ describe('gap-fixes — unit tests (no localstack)', () => {
       consumer.stop();
     });
 
-    it('should rethrow when DLQ publish fails', async () => {
+    it('logs and rethrows when DLQ publish itself fails', async () => {
       const ctx = makeContext();
       const sendMock = jest.fn().mockRejectedValue(new Error('SQS down'));
       const { endpoints } = makeEndpoint(sendMock);
-      const allQueues: Record<string, SQSEnhancedQueue> = {};
-      const queue = await buildQueue(ctx, endpoints, allQueues, { deadLetter: 'myDLQ' });
-      const dlqQueue = await getQueue(ctx, endpoints, 'myDLQ', { name: 'my-dlq' }, allQueues);
-      allQueues.myQueue = queue;
-      allQueues.myDLQ = dlqQueue;
+      const queue = await buildQueue(ctx, endpoints, {
+        deadLetter: 'payment_dwolla_webhooks_unprocessable',
+      });
 
       const consumer = queue.createConsumer(async () => {
         const e = new Error('handler error');
         (e as any).deadLetter = true;
         throw e;
       });
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
 
-      const consumerAny = consumer as any;
-      const internalHandle = consumerAny._sqsOptions?.handleMessage
-        ?? consumerAny.sqsOptions?.handleMessage
-        ?? consumerAny.options?.handleMessage;
-
-      if (!internalHandle) {
-        consumer.stop();
-        return;
-      }
-
-      const testMsg: Message = { Body: '{"x":1}', MessageId: 'id-1', ReceiptHandle: 'rh-1' };
-      await expect(internalHandle(testMsg)).rejects.toThrow('SQS down');
+      await expect(handle({ Body: '{"x":1}', MessageId: 'i', ReceiptHandle: 'r' })).rejects.toThrow('SQS down');
       expect(ctx.logger.error).toHaveBeenCalledWith(
         expect.anything(),
         'Failed to publish to configured DLQ',
       );
+      consumer.stop();
+    });
+
+    it('routes to explicit queue name when deadLetter is a string on the error', async () => {
+      const ctx = makeContext();
+      const sendMock = jest.fn().mockResolvedValue({ MessageId: 'dlq-id' });
+      const { endpoints } = makeEndpoint(sendMock);
+      const queue = await buildQueue(ctx, endpoints);
+
+      const consumer = queue.createConsumer(async () => {
+        const e = new Error('explicit route');
+        (e as any).deadLetter = 'some_other_dlq';
+        throw e;
+      });
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
+
+      const result = await handle({ Body: '{"x":1}', MessageId: 'i', ReceiptHandle: 'r' });
+      expect(result).toBeDefined(); // ACKed
+      const dlqCall = sendMock.mock.calls.find(
+        (call: any[]) => call[0]?.input?.QueueUrl?.includes('some_other_dlq'),
+      );
+      expect(dlqCall).toBeDefined();
       consumer.stop();
     });
   });
@@ -230,47 +225,39 @@ describe('gap-fixes — unit tests (no localstack)', () => {
   // SC-004: Consumer requests CorrelationId + All attrs
   // ──────────────────────────────────────────────────
   describe('SC-004: Consumer message attribute names', () => {
-    it('should include CorrelationId and ErrorDetail in messageAttributeNames', async () => {
+    it('always includes CorrelationId and ErrorDetail in messageAttributeNames', async () => {
       const ctx = makeContext();
       const { endpoints } = makeEndpoint();
       const queue = await buildQueue(ctx, endpoints);
 
-      const consumer = queue.createConsumer(jest.fn());
-      const consumerAny = consumer as any;
-
-      // sqs-consumer v6 stores options at multiple possible paths
-      const opts = consumerAny._sqsOptions ?? consumerAny.sqsOptions ?? consumerAny;
-      const attrNames: string[] = opts?.messageAttributeNames ?? [];
-
-      expect(attrNames).toContain('CorrelationId');
-      expect(attrNames).toContain('ErrorDetail');
+      const consumer = queue.createConsumer(jest.fn()) as any;
+      const opts = consumer._sqsOptions ?? consumer.sqsOptions ?? consumer;
+      expect(opts?.messageAttributeNames).toContain('CorrelationId');
+      expect(opts?.messageAttributeNames).toContain('ErrorDetail');
       consumer.stop();
     });
 
-    it('should merge caller-provided messageAttributeNames', async () => {
+    it('merges caller-provided messageAttributeNames without dropping library defaults', async () => {
       const ctx = makeContext();
       const { endpoints } = makeEndpoint();
       const queue = await buildQueue(ctx, endpoints);
 
       const consumer = queue.createConsumer(jest.fn(), {
         messageAttributeNames: ['CustomAttr'],
-      });
-      const consumerAny = consumer as any;
-      const opts = consumerAny._sqsOptions ?? consumerAny.sqsOptions ?? consumerAny;
-      const attrNames: string[] = opts?.messageAttributeNames ?? [];
-
-      expect(attrNames).toContain('CorrelationId');
-      expect(attrNames).toContain('ErrorDetail');
-      expect(attrNames).toContain('CustomAttr');
+      }) as any;
+      const opts = consumer._sqsOptions ?? consumer.sqsOptions ?? consumer;
+      expect(opts?.messageAttributeNames).toContain('CorrelationId');
+      expect(opts?.messageAttributeNames).toContain('ErrorDetail');
+      expect(opts?.messageAttributeNames).toContain('CustomAttr');
       consumer.stop();
     });
   });
 
   // ──────────────────────────────────────────────────
-  // SC-005: publish() passes through MessageAttributes
+  // SC-005: publish() CorrelationId pass-through
   // ──────────────────────────────────────────────────
   describe('SC-005: publish() CorrelationId pass-through', () => {
-    it('should include provided CorrelationId in published message', async () => {
+    it('forwards CorrelationId when provided in MessageAttributes', async () => {
       const ctx = makeContext();
       const sendMock = jest.fn().mockResolvedValue({ MessageId: 'pub-id' });
       const { endpoints } = makeEndpoint(sendMock);
@@ -278,15 +265,15 @@ describe('gap-fixes — unit tests (no localstack)', () => {
 
       await queue.publish({ event: 'test' }, {
         MessageAttributes: {
-          CorrelationId: { DataType: 'String', StringValue: 'corr-abc' },
+          CorrelationId: { DataType: 'String', StringValue: 'corr-xyz' },
         },
       });
 
-      const call = sendMock.mock.calls[0][0];
-      expect(call.input.MessageAttributes.CorrelationId.StringValue).toBe('corr-abc');
+      const input = sendMock.mock.calls[0][0].input;
+      expect(input.MessageAttributes.CorrelationId.StringValue).toBe('corr-xyz');
     });
 
-    it('should NOT inject CorrelationId when not provided', async () => {
+    it('does NOT inject CorrelationId when caller omits it', async () => {
       const ctx = makeContext();
       const sendMock = jest.fn().mockResolvedValue({ MessageId: 'pub-id' });
       const { endpoints } = makeEndpoint(sendMock);
@@ -294,35 +281,51 @@ describe('gap-fixes — unit tests (no localstack)', () => {
 
       await queue.publish({ event: 'test' });
 
-      const call = sendMock.mock.calls[0][0];
-      expect(call.input.MessageAttributes).toBeUndefined();
+      const input = sendMock.mock.calls[0][0].input;
+      expect(input.MessageAttributes).toBeUndefined();
     });
   });
 
   // ──────────────────────────────────────────────────
   // SC-006: reject() method
   // ──────────────────────────────────────────────────
-  describe('SC-006: reject() method', () => {
-    it('should throw an error with deadLetter=true', async () => {
-      const ctx = makeContext();
-      const { endpoints } = makeEndpoint();
-      const queue = await buildQueue(ctx, endpoints);
-
-      expect(() => queue.reject('bad message')).toThrow('bad message');
-    });
-
-    it('should set deadLetter=true on the thrown error', async () => {
+  describe('SC-006: reject()', () => {
+    it('throws with deadLetter=true and the provided reason as message', async () => {
       const ctx = makeContext();
       const { endpoints } = makeEndpoint();
       const queue = await buildQueue(ctx, endpoints);
 
       try {
-        queue.reject('test reject');
+        queue.reject('bad message format');
         fail('should have thrown');
       } catch (e: any) {
+        expect(e.message).toBe('bad message format');
         expect(e.deadLetter).toBe(true);
-        expect(e.message).toBe('test reject');
       }
+    });
+
+    it('integrates with DLQ routing — reject() in a handler routes to configured DLQ', async () => {
+      const ctx = makeContext();
+      const sendMock = jest.fn().mockResolvedValue({ MessageId: 'dlq-id' });
+      const { endpoints } = makeEndpoint(sendMock);
+      const queue = await buildQueue(ctx, endpoints, {
+        deadLetter: 'payment_dwolla_webhooks_unprocessable',
+      });
+
+      const consumer = queue.createConsumer(async (_ctx, _msg, _orig) => {
+        queue.reject('cannot process');
+      });
+      const handle = getInternalHandle(consumer);
+      if (!handle) { consumer.stop(); return; }
+
+      const result = await handle({ Body: '{"amount":50}', MessageId: 'i', ReceiptHandle: 'r' });
+      expect(result).toBeDefined(); // ACKed
+      const dlqCall = sendMock.mock.calls.find(
+        (call: any[]) => call[0]?.input?.QueueUrl?.includes('payment_dwolla_webhooks_unprocessable'),
+      );
+      expect(dlqCall).toBeDefined();
+      expect(dlqCall![0].input.MessageAttributes.ErrorDetail.StringValue).toBe('cannot process');
+      consumer.stop();
     });
   });
 });

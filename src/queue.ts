@@ -14,7 +14,6 @@ export async function getQueue(
   endpoints: Record<string, RawSqsEndpoint>,
   localName: string,
   config: SQSQueueConfiguration,
-  allQueues: Record<string, SQSEnhancedQueue>,
 ): Promise<SQSEnhancedQueue> {
   const name = config.name || localName;
   const { endpoint } = config;
@@ -70,16 +69,18 @@ export async function getQueue(
             if (err.deadLetter) {
               const dlqName: string | undefined = err.deadLetter === true
                 ? config.deadLetter : err.deadLetter;
-              if (!dlqName || !allQueues[dlqName]) {
+              if (!dlqName) {
                 context.logger.error(
                   err,
                   'SQS deadLetter error, but no deadLetter queue configured',
                 );
               } else {
                 try {
-                  // Forward the raw body and original attributes, adding ErrorDetail
+                  // Build DLQ URL directly from the queue name — no separate config entry needed.
+                  // Uses the same endpoint as the source queue.
+                  const dlqUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${dlqName}`;
                   const dlqCommand = new SendMessageCommand({
-                    QueueUrl: allQueues[dlqName].url,
+                    QueueUrl: dlqUrl,
                     MessageBody: message.Body!,
                     MessageAttributes: {
                       ...message.MessageAttributes,
