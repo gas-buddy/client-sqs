@@ -5,6 +5,23 @@
 .yarnrc.yml
 .yarn
 
+# Source / dev artefacts — not needed by consumers
+src/
+__tests__/
+tsconfig*.json
+jest.config.*
+
+# Docs / AI / planning context
+docs/
+.pilot/
+.claude/
+CLAUDE.md
+CLIENT_SQS_GAP_ANALYSIS.md
+
+# CI / tooling
+.github/
+.husky/
+
 # Stock
 *.seed
 *.log
