@@ -9,14 +9,12 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      localstack:
-        image: localstack/localstack:latest
+      elasticmq:
+        image: public.ecr.aws/redbrick-ai/elasticmq-native:latest
         ports:
-          - 4566:4566
-        env:
-          SERVICES: sqs
+          - 9324:9324
         options: >-
-          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-cmd "curl -sf http://localhost:9324"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -30,13 +28,17 @@ jobs:
       with:
         node-version-file: .nvmrc
 
-    - name: Install awslocal
-      run: pip install awscli-local
-
     - name: Create test queue
-      run: awslocal sqs create-queue --queue-name sample-queue
+      run: |
+        aws --endpoint-url=http://localhost:9324 --region us-east-1 \
+          sqs create-queue --queue-name sample-queue
+      env:
+        AWS_ACCESS_KEY_ID: key
+        AWS_SECRET_ACCESS_KEY: secret
 
     - run: yarn install --immutable
     - run: yarn build
     - run: yarn lint
     - run: yarn test
+      env:
+        SQS_PORT: 9324
