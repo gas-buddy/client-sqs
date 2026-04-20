@@ -8,17 +8,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    services:
-      elasticmq:
-        image: public.ecr.aws/redbrick-ai/elasticmq-native:latest
-        ports:
-          - 9324:9324
-        options: >-
-          --health-cmd "curl -sf http://localhost:9324"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
     - uses: actions/checkout@v4
       with:
@@ -28,17 +17,7 @@ jobs:
       with:
         node-version-file: .nvmrc
 
-    - name: Create test queue
-      run: |
-        aws --endpoint-url=http://localhost:9324 --region us-east-1 \
-          sqs create-queue --queue-name sample-queue
-      env:
-        AWS_ACCESS_KEY_ID: key
-        AWS_SECRET_ACCESS_KEY: secret
-
     - run: yarn install --immutable
     - run: yarn build
     - run: yarn lint
     - run: yarn test
-      env:
-        SQS_PORT: 9324
