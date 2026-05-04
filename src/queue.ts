@@ -22,6 +22,28 @@ export async function getQueue(
   const qurl = (ep.config.endpoint as string) || `http://${ep.region}.queue.amazonaws.com`;
   const fullUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${name}`;
 
+  // Publish a message to the configured DLQ with an ErrorDetail attribute and preserve the
+  // original MessageAttributes (e.g. CorrelationId). Shared by both the parse-failure branch
+  // and the handler-thrown `deadLetter` branch so every DLQ'd message carries ErrorDetail.
+  async function publishToDeadLetter(
+    message: Message,
+    dlqName: string,
+    reason: string,
+  ): Promise<void> {
+    const dlqUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${dlqName}`;
+    await ep.sqs.send(new SendMessageCommand({
+      QueueUrl: dlqUrl,
+      MessageBody: message.Body!,
+      MessageAttributes: {
+        ...message.MessageAttributes,
+        ErrorDetail: {
+          DataType: 'String',
+          StringValue: reason,
+        },
+      },
+    }));
+  }
+
   return {
     name: localName,
     url: fullUrl,
@@ -58,7 +80,29 @@ export async function getQueue(
             parsed = JSON.parse(message.Body!) as T;
           } catch (e) {
             context.logger.error(e, 'Invalid JSON in SQS message');
-            throw e;
+            // Route parse failures through the same DLQ publish path as handler-thrown
+            // `deadLetter` errors so every DLQ message carries ErrorDetail (and any original
+            // MessageAttributes such as CorrelationId). When no DLQ is configured, preserve
+            // the prior behaviour: rethrow so sqs-consumer leaves the message visible and any
+            // AWS-native RedrivePolicy takes over.
+            if (!config.deadLetter) {
+              throw e;
+            }
+            try {
+              await publishToDeadLetter(
+                message,
+                config.deadLetter,
+                `Invalid JSON: ${String((e as Error).message ?? e)}`,
+              );
+              // ACK original by returning message
+              return message;
+            } catch (sqsError) {
+              context.logger.error(
+                sqsError,
+                'Failed to publish parse-failure to configured DLQ',
+              );
+              throw sqsError;
+            }
           }
           try {
             await handler(context, parsed, message);
@@ -76,21 +120,7 @@ export async function getQueue(
                 );
               } else {
                 try {
-                  // Build DLQ URL directly from the queue name — no separate config entry needed.
-                  // Uses the same endpoint as the source queue.
-                  const dlqUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${dlqName}`;
-                  const dlqCommand = new SendMessageCommand({
-                    QueueUrl: dlqUrl,
-                    MessageBody: message.Body!,
-                    MessageAttributes: {
-                      ...message.MessageAttributes,
-                      ErrorDetail: {
-                        DataType: 'String',
-                        StringValue: String(err.message ?? err),
-                      },
-                    },
-                  });
-                  await ep.sqs.send(dlqCommand);
+                  await publishToDeadLetter(message, dlqName, String(err.message ?? err));
                   // ACK original by returning message
                   return message;
                 } catch (sqsError) {

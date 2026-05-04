@@ -60,8 +60,8 @@ afterEach(() => {
   (resetSqsMock as any)();
 });
 
-describe('JSON parse error rethrows', () => {
-  it('rethrows on invalid JSON so the message is NOT acked', async () => {
+describe('JSON parse error (no DLQ configured)', () => {
+  it('rethrows on invalid JSON so the message is NOT acked when no deadLetter configured', async () => {
     const ctx = makeContext();
     const queue = await buildQueue(ctx, makeEndpoint());
 
@@ -86,6 +86,92 @@ describe('JSON parse error rethrows', () => {
 
     await expect(handle({ Body: '{bad', MessageId: 'x', ReceiptHandle: 'y' })).rejects.toThrow();
     expect(handler).not.toHaveBeenCalled();
+    consumer.stop();
+  });
+});
+
+describe('Parse failure DLQ routing', () => {
+  it('routes unparseable body to configured DLQ with ErrorDetail and ACKs source', async () => {
+    const ctx = makeContext();
+    const queue = await buildQueue(ctx, makeEndpoint(), {
+      deadLetter: 'payment_dwolla_webhooks_unprocessable',
+    });
+
+    const handler = jest.fn();
+    const consumer = queue.createConsumer(handler);
+    const handle = getInternalHandle(consumer);
+    if (!handle) { consumer.stop(); return; }
+
+    const badMsg: Message = {
+      Body: 'not-json-at-all-}{broken',
+      MessageId: 'orig-id',
+      ReceiptHandle: 'orig-rh',
+    };
+
+    const result = await handle(badMsg);
+    expect(result).toEqual(badMsg);
+    expect(handler).not.toHaveBeenCalled();
+
+    const dlqCall = (mockSend as jest.Mock).mock.calls.find(
+      (call: any[]) => call[0]?.input?.QueueUrl?.includes('payment_dwolla_webhooks_unprocessable'),
+    );
+    expect(dlqCall).toBeDefined();
+    const { input } = dlqCall![0];
+    expect(input.MessageBody).toBe(badMsg.Body);
+    expect(input.MessageAttributes.ErrorDetail.DataType).toBe('String');
+    expect(input.MessageAttributes.ErrorDetail.StringValue).toMatch(/^Invalid JSON: /);
+    consumer.stop();
+  });
+
+  it('preserves original CorrelationId on the DLQ message when parse fails', async () => {
+    const ctx = makeContext();
+    const queue = await buildQueue(ctx, makeEndpoint(), {
+      deadLetter: 'payment_dwolla_webhooks_unprocessable',
+    });
+
+    const consumer = queue.createConsumer(jest.fn());
+    const handle = getInternalHandle(consumer);
+    if (!handle) { consumer.stop(); return; }
+
+    const badMsg: Message = {
+      Body: '{notvalid',
+      MessageId: 'orig-id',
+      ReceiptHandle: 'orig-rh',
+      MessageAttributes: {
+        CorrelationId: { DataType: 'String', StringValue: 'corr-parse-fail' },
+      },
+    };
+
+    await handle(badMsg);
+
+    const dlqCall = (mockSend as jest.Mock).mock.calls.find(
+      (call: any[]) => call[0]?.input?.QueueUrl?.includes('payment_dwolla_webhooks_unprocessable'),
+    );
+    expect(dlqCall).toBeDefined();
+    const { input } = dlqCall![0];
+    expect(input.MessageAttributes.CorrelationId.StringValue).toBe('corr-parse-fail');
+    expect(input.MessageAttributes.ErrorDetail).toBeDefined();
+    consumer.stop();
+  });
+
+  it('logs and rethrows when DLQ publish itself fails on parse-failure path', async () => {
+    const ctx = makeContext();
+    (mockSqsSend as any)(jest.fn().mockRejectedValue(new Error('SQS down')));
+    const queue = await buildQueue(ctx, makeEndpoint(), {
+      deadLetter: 'payment_dwolla_webhooks_unprocessable',
+    });
+
+    const consumer = queue.createConsumer(jest.fn());
+    const handle = getInternalHandle(consumer);
+    if (!handle) { consumer.stop(); return; }
+
+    await expect(
+      handle({ Body: 'not-json', MessageId: 'i', ReceiptHandle: 'r' }),
+    ).rejects.toThrow('SQS down');
+    expect(ctx.logger.error).toHaveBeenCalledWith(
+      expect.anything(),
+      'Failed to publish parse-failure to configured DLQ',
+    );
     consumer.stop();
   });
 });
