@@ -30,15 +30,19 @@ client-sqs/
 │       ├── index.ts        # Public types exported by the package
 │       └── internal.ts     # RawSqsEndpoint (internal only)
 ├── __tests__/
-│   ├── index.spec.ts       # Integration test (localstack required)
-│   └── gap-fixes.spec.ts   # Unit tests for DLQ routing/CorrelationId/reject (no localstack)
+│   └── index.spec.ts       # Unit tests (jest; @aws-sdk/client-sqs manual-mocked via __mocks__/)
+├── __mocks__/
+│   └── @aws-sdk/
+│       └── client-sqs.ts   # Jest manual mock used by __tests__/ and in CI
 ├── build/                  # Compiled output (gitignored)
 ├── docs/
+│   ├── PARSE_FAILURE_DLQ_GAP.md    # v23 parse-failure DLQ gap (resolved in beta.2)
+│   ├── CLIENT_SQS_GAP_ANALYSIS.md  # v21 vs v23 gap list
 │   └── ai-context/         # AI documentation (project-structure, docs-overview)
 ├── .github/
-│   └── workflows/          # CI: nodejs.yml, npmpublish.yml
+│   └── workflows/          # CI: nodejs.yml, npmpublish.yml (runs jest — no external SQS)
 ├── README.md               # Full usage examples
-├── package.json            # @gasbuddy/client-sqs v1.0.1
+├── package.json            # @gasbuddy/client-sqs v1.1.0-beta.2
 ├── tsconfig.json           # Full tsconfig (with strict mode)
 ├── tsconfig.build.json     # Build-only tsconfig (excludes tests)
 └── CLAUDE.md               # AI entry point
@@ -51,7 +55,9 @@ client-sqs/
 - **Configuration-driven**: Queues and endpoints declared as typed config objects; no imperative wiring
 - **Auto-detection**: Missing `accountId`/`region` fetched from EC2 instance metadata (`169.254.169.254`)
 - **Role verification**: `requiredRole` in endpoint config triggers STS `GetCallerIdentity` check at startup
-- **JSON-first**: `publish` serializes to JSON; `createConsumer` auto-parses; parse failure rethrows (no silent ack)
+- **JSON-first**: `publish` serializes to JSON; `createConsumer` auto-parses; unparseable
+  bodies route to `config.deadLetter` (with `ErrorDetail: "Invalid JSON: <reason>"` + original
+  `MessageAttributes`) when configured, otherwise rethrow (no silent ack)
 - **Dead-letter routing**: throw `error.deadLetter = true` or call `queue.reject(reason)` to route to configured DLQ
 - **CorrelationId**: consumers always request `CorrelationId` + `ErrorDetail` attrs; publishers pass them via `MessageAttributes`
 - **Generic types**: Queue names (`Q extends string`) and endpoints (`Endpoints extends 'default'`) are type-safe via generics

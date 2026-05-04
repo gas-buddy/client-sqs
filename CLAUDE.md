@@ -31,9 +31,20 @@ const client = await createSQSClient(context, config);
 
 ### Dead Letter Routing
 
-Set `deadLetter` on a queue config to enable DLQ routing. In handlers, call `queue.reject('reason')` or throw with `error.deadLetter = true`. The library will:
+Set `deadLetter` on a queue config to enable DLQ routing. Two triggers send a message to the DLQ:
+
+1. **Handler-thrown failure** — call `queue.reject('reason')` or throw with `error.deadLetter = true`.
+2. **JSON parse failure** — the library itself routes unparseable bodies to the configured DLQ
+   with `ErrorDetail: "Invalid JSON: <reason>"`.
+
+In both cases the library will:
 1. Publish the raw message body to the DLQ with `ErrorDetail` + original `MessageAttributes`
 2. ACK the original message (delete from source queue)
+
+Every DLQ message carries `ErrorDetail` — the contract is encoded in a single
+`publishToDeadLetter()` helper shared by both paths. When `config.deadLetter` is unset,
+parse failures rethrow so `sqs-consumer` leaves the message visible (any AWS-native
+`RedrivePolicy` may take over, but the AWS redrive path does not add `ErrorDetail`).
 
 See `README.md` for full examples.
 
@@ -80,8 +91,10 @@ await client.queues.myQueue.publish({ event: 'order.created' });
 
 ```bash
 yarn build        # tsc → build/
-yarn test         # jest (requires localstack on :4566)
+yarn test         # jest — uses manual mock of @aws-sdk/client-sqs (__mocks__/)
 yarn lint         # eslint src/
 ```
 
-Tests connect to a real local SQS endpoint (localstack). Set `SQS_HOST`, `SQS_PORT`, `SQS_ACCOUNT_ID` env vars to override defaults.
+Unit tests use a Jest manual mock — no external container required. CI runs the same suite
+against an ElasticMQ container (replaced LocalStack because LocalStack requires an auth token
+post-2026).

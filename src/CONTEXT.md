@@ -27,11 +27,16 @@ All library source code. TypeScript, compiled to `build/` via `tsc`.
 - **createConsumer**: wraps `sqs-consumer` `Consumer`
   - Always requests `messageAttributeNames: ['CorrelationId', 'ErrorDetail', ...callerAttrs]`
   - Always requests `attributeNames: ['All']` (system attributes like ApproximateReceiveCount)
-  - JSON parse failure: logs + rethrows (message NOT acked)
+  - JSON parse failure + `config.deadLetter` set: publishes raw body to DLQ with
+    `ErrorDetail: "Invalid JSON: <reason>"` and original `MessageAttributes`, ACKs source
+  - JSON parse failure + no `config.deadLetter`: logs + rethrows (message NOT acked; AWS-native
+    `RedrivePolicy` may take over, but without `ErrorDetail`)
   - Handler throws `error.deadLetter = true`: routes to `config.deadLetter` queue, ACKs original
   - Handler throws `error.deadLetter = "queueName"`: routes to named queue, ACKs original
   - No DLQ configured: logs error, rethrows
-  - DLQ publish failure: logs + rethrows
+  - DLQ publish failure: logs + rethrows (source stays visible)
+  - All DLQ publishes go through a single `publishToDeadLetter()` helper so every DLQ
+    message carries `ErrorDetail`
 - **receive**: `ReceiveMessageCommand`; returns parsed messages (or raw if `noParse: true`)
 - **ack**: `DeleteMessageCommand` by `ReceiptHandle`
 - **reject(reason)**: convenience — creates `Error(reason)` with `deadLetter=true`, throws
@@ -57,5 +62,10 @@ All library source code. TypeScript, compiled to `build/` via `tsc`.
 
 - **DLQ routing**: throw `Object.assign(new Error(msg), { deadLetter: true })` or call `queue.reject(msg)`
 - **CorrelationId**: caller provides in `MessageAttributes`; library always requests it from SQS
-- **No silent acks**: both parse errors and handler errors rethrow (message returns to queue)
+- **No silent acks**: unparseable messages are either routed to the configured DLQ
+  (with `ErrorDetail` + preserved `MessageAttributes`) or rethrown when no DLQ is configured —
+  never silently dropped. Handler errors without `deadLetter` rethrow so the source message stays visible.
 - Consumer errors log then rethrow; `sqs-consumer` does NOT ack the message on throw
+- **Single DLQ publish path**: both parse failures and handler-thrown `deadLetter` errors go
+  through `publishToDeadLetter()` so the invariant *every DLQ message has `ErrorDetail`* is
+  encoded in one place

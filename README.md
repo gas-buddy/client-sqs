@@ -156,6 +156,23 @@ throw err;
 - If DLQ publish fails: logs error, rethrows (message returns to source queue for retry)
 - If no `deadLetter` configured but `error.deadLetter = true`: logs error, rethrows
 
+### Parse failures route to DLQ too
+
+When a consumer receives a message with an unparseable JSON body:
+
+- If `config.deadLetter` **is set**: the raw body is published to the DLQ with
+  `ErrorDetail: "Invalid JSON: <reason>"` and the original `MessageAttributes`
+  (including any publisher-set `CorrelationId`) are preserved. The source message
+  is ACKed.
+- If `config.deadLetter` **is not set**: the `SyntaxError` is logged and rethrown
+  so `sqs-consumer` leaves the message visible. Any AWS-native `RedrivePolicy`
+  on the queue will eventually move the message off the main queue, but the
+  redrive path does **not** add `ErrorDetail` — operators should prefer
+  configuring `deadLetter` on the queue so every DLQ message carries context.
+
+This means the invariant **every DLQ message has `ErrorDetail`** holds for both
+handler-thrown failures and parse failures when `config.deadLetter` is set.
+
 ---
 
 ## Non-Consumer Receive + Ack
@@ -185,7 +202,9 @@ const rawMessages = await client.queues.orders.receive({ noParse: true });
 
 | Scenario | Behaviour |
 |----------|-----------|
-| JSON parse failure in consumer | Logs error, **rethrows** (message returns to queue / DLQ via SQS redrive) |
+| JSON parse failure + `deadLetter` configured | Publishes raw body to DLQ with `ErrorDetail: "Invalid JSON: <reason>"` and original `MessageAttributes`; ACKs source |
+| JSON parse failure + no `deadLetter` configured | Logs error, **rethrows** (message returns to queue; AWS-native `RedrivePolicy` may take over, but without `ErrorDetail`) |
+| JSON parse failure + DLQ publish fails | Logs error, rethrows (source stays visible) |
 | Handler throws with `error.deadLetter = true` | Routes to configured DLQ, ACKs original |
 | Handler throws with `error.deadLetter = 'queueName'` | Routes to named queue, ACKs original |
 | Handler throws normally | Logs error, rethrows (message returns to queue) |
@@ -219,26 +238,12 @@ interface SQSEndpointConfiguration {
 
 ## Local Development / Testing
 
-Tests require localstack running on `:4566`:
+Unit tests use a Jest manual mock of `@aws-sdk/client-sqs` (see `__mocks__/`) — no
+external container required:
 
 ```bash
-docker run -p 4566:4566 localstack/localstack
-
-# Create a test queue
-aws --endpoint-url=http://localhost:4566 sqs create-queue --queue-name sample-queue \
-    --region us-east-1
-
 yarn test
 ```
 
-Override endpoint:
-
-```bash
-SQS_HOST=127.0.0.1 SQS_PORT=4566 SQS_ACCOUNT_ID=000000000000 yarn test
-```
-
-Unit tests (no localstack) run automatically:
-
-```bash
-yarn test --testPathPattern="gap-fixes"
-```
+CI runs the same suite against an ElasticMQ container (replacement for LocalStack).
+No auth token needed.
