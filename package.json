@@ -4,6 +4,11 @@
   "description": "A configuration driven SQS client",
   "main": "build/index.js",
   "types": "build/index.d.ts",
+  "files": [
+    "build/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "jest",
     "lint": "eslint src",
