@@ -2,7 +2,18 @@
 
 A configuration-driven SQS client for GasBuddy services (gb-services v23+).
 
-Built on `@aws-sdk/client-sqs` v3 and `sqs-consumer` v6.
+Built on `@aws-sdk/client-sqs` v3 and `sqs-consumer` v6. Node 18+.
+
+**What it adds on top of the AWS SDK:**
+
+- Typed, named queue configuration — refer to queues by alias, not URL
+- Auto-detected AWS region / accountId via EC2 instance metadata
+- Optional STS `GetCallerIdentity` role check at startup (`requiredRole`)
+- Library-managed dead-letter routing for both handler-thrown failures **and**
+  JSON parse failures — every DLQ message carries `ErrorDetail`
+- `CorrelationId` + `ErrorDetail` message-attribute pass-through (no auto-generation)
+- `reject(reason)` convenience for handlers that want to send a poison message
+  to the DLQ with a human-readable reason
 
 ---
 
@@ -18,7 +29,7 @@ yarn add @gasbuddy/client-sqs
 
 ```typescript
 import { createSQSClient } from '@gasbuddy/client-sqs';
-import type { BaseLogger } from 'pino';
+import pino from 'pino';
 
 const client = await createSQSClient(
   { logger: pino() },
@@ -26,6 +37,8 @@ const client = await createSQSClient(
     endpoints: {
       default: {
         accountId: '123456789',
+        // Optional: verifies the running process has assumed this role via STS at startup.
+        requiredRole: 'arn:aws:iam::123456789:role/sqs-consumer',
         config: { region: 'us-east-1' },
       },
     },
@@ -35,6 +48,9 @@ const client = await createSQSClient(
   },
 );
 ```
+
+If `accountId` or `region` are omitted, the library fetches them from the EC2 instance
+metadata service. Outside EC2 (local dev, CI), supply both explicitly.
 
 ---
 
@@ -95,6 +111,17 @@ const consumer = client.queues.orders.createConsumer(handler, {
 
 The library always requests `CorrelationId`, `ErrorDetail`, and all SQS system attributes
 (`attributeNames: ['All']`) so consumers always have access to these without extra config.
+
+### Consumer error events
+
+The library wires default `error`, `processing_error`, and `timeout_error` listeners that log
+through the `context.logger` you supplied to `createSQSClient`. You can attach your own
+listeners on top — they fire alongside the library's:
+
+```typescript
+consumer.on('error', (err) => metrics.increment('sqs.error'));
+consumer.on('processing_error', (err) => alerting.notify(err));
+```
 
 ---
 
@@ -189,10 +216,14 @@ for (const { message, original } of messages) {
   if (message) {
     await processOrder(message);
     await client.queues.orders.ack(original);
+  } else {
+    // Parse failure — `message` is undefined and `original.Body` holds the raw bytes.
+    // Caller decides what to do (DLQ-publish manually, ack-and-drop, leave for redrive).
+    // Unlike createConsumer(), receive() does NOT auto-route parse failures to config.deadLetter.
   }
 }
 
-// Receive raw (no JSON parse):
+// Receive raw (no JSON parse — every entry comes back with message: undefined):
 const rawMessages = await client.queues.orders.receive({ noParse: true });
 ```
 
@@ -202,21 +233,23 @@ const rawMessages = await client.queues.orders.receive({ noParse: true });
 
 | Scenario | Behaviour |
 |----------|-----------|
-| JSON parse failure + `deadLetter` configured | Publishes raw body to DLQ with `ErrorDetail: "Invalid JSON: <reason>"` and original `MessageAttributes`; ACKs source |
-| JSON parse failure + no `deadLetter` configured | Logs error, **rethrows** (message returns to queue; AWS-native `RedrivePolicy` may take over, but without `ErrorDetail`) |
-| JSON parse failure + DLQ publish fails | Logs error, rethrows (source stays visible) |
-| Handler throws with `error.deadLetter = true` | Routes to configured DLQ, ACKs original |
-| Handler throws with `error.deadLetter = 'queueName'` | Routes to named queue, ACKs original |
-| Handler throws normally | Logs error, rethrows (message returns to queue) |
-| DLQ not configured but `deadLetter = true` | Logs error, rethrows |
-| DLQ publish fails | Logs error, rethrows original error |
+| `createConsumer`: JSON parse failure + `deadLetter` configured | Publishes raw body to DLQ with `ErrorDetail: "Invalid JSON: <reason>"` and original `MessageAttributes`; ACKs source |
+| `createConsumer`: JSON parse failure + no `deadLetter` configured | Logs error, **rethrows** (message returns to queue; AWS-native `RedrivePolicy` may take over, but without `ErrorDetail`) |
+| `createConsumer`: JSON parse failure + DLQ publish fails | Logs error, rethrows (source stays visible) |
+| `createConsumer`: handler throws with `error.deadLetter = true` | Routes to configured DLQ, ACKs original |
+| `createConsumer`: handler throws with `error.deadLetter = 'queueName'` | Routes to named queue, ACKs original |
+| `createConsumer`: handler throws normally | Logs error, rethrows (message returns to queue) |
+| `createConsumer`: DLQ not configured but `deadLetter = true` | Logs error, rethrows |
+| `createConsumer`: DLQ publish fails | Logs error, rethrows original error |
+| `receive()`: JSON parse failure | Logs warning, returns `{ message: undefined, original }` — caller decides |
+| `receive({ noParse: true })` | Always returns `{ message: undefined, original }` for every result |
 
 ---
 
 ## Configuration Reference
 
 ```typescript
-interface SQSClientConfiguration<Q extends string, Endpoints extends 'default'> {
+interface SQSClientConfiguration<Q extends string, Endpoints extends 'default' = 'default'> {
   queues: Record<Q, SQSQueueConfiguration>;
   endpoints?: Record<Endpoints, SQSEndpointConfiguration>;
 }
@@ -224,13 +257,17 @@ interface SQSClientConfiguration<Q extends string, Endpoints extends 'default'> 
 interface SQSQueueConfiguration {
   name?: string;       // SQS queue name (defaults to the config key)
   deadLetter?: string; // SQS queue name of the DLQ (no separate config entry required)
-  endpoint?: string;   // named endpoint for this queue (defaults to 'default')
+  readers?: number;    // Hint consumed by callers that spin up multiple createConsumer()
+                       // instances; the library itself does not multiply consumers — it is
+                       // a config-level field for orchestration code (e.g. v21 parity)
+  endpoint?: string;   // Named endpoint key for this queue (defaults to 'default')
 }
 
 interface SQSEndpointConfiguration {
-  accountId?: string;    // AWS account ID for URL construction
-  requiredRole?: string; // IAM role ARN fragment; verified via STS on startup
-  config: SQSClientConfig; // passed directly to @aws-sdk/client-sqs SQSClient
+  accountId?: string;    // AWS account ID for URL construction (auto-fetched from EC2 metadata if unset)
+  requiredRole?: string; // Substring matched against STS GetCallerIdentity ARN at startup;
+                         // throws if the running process is not assuming a matching role
+  config: SQSClientConfig; // Passed directly to @aws-sdk/client-sqs SQSClient (region, endpoint, credentials)
 }
 ```
 
