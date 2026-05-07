@@ -2,8 +2,6 @@
 
 A configuration-driven SQS client for GasBuddy services.
 
-> **See also**: [Project Structure](docs/ai-context/project-structure.md) | [Docs Overview](docs/ai-context/docs-overview.md)
-
 ---
 
 ## Architecture

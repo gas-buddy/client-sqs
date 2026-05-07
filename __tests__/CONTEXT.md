@@ -1,53 +1,36 @@
-# __tests__ — Test Suite
+# __tests__ — Mock internals
 
-## Purpose
+Non-obvious bits of the test setup. Everything else (what's covered, run command,
+ElasticMQ-in-CI) lives in `CLAUDE.md` and the spec file itself.
 
-Unit tests for `@gasbuddy/client-sqs`. Uses a Jest manual mock of `@aws-sdk/client-sqs`
-(see `__mocks__/@aws-sdk/client-sqs.ts`) — no external container or real SQS endpoint
-required. CI runs the same suite against an ElasticMQ container for an additional
-end-to-end smoke check.
+## Manual mock of `@aws-sdk/client-sqs`
 
----
+`jest.mock('@aws-sdk/client-sqs')` at the top of the spec activates the file at
+`__mocks__/@aws-sdk/client-sqs.ts`. The mock exposes three helpers re-exported
+alongside the real types:
 
-## Setup
+| Helper | Purpose |
+|--------|---------|
+| `mockSend` | The `jest.fn()` backing every `SQSClient.send()` call — assert on `.mock.calls[].input` |
+| `mockSqsSend(fn)` | Swap the underlying send implementation (e.g. inject a rejection for DLQ-publish-fail tests) |
+| `resetSqsMock()` | Restore default send + clear call history; called from `afterEach` |
 
-**Run**: `yarn test` (Jest 29 + ts-jest)
+## Reaching `handleMessage` without starting a poller
 
-No env vars required. `jest.mock('@aws-sdk/client-sqs')` at the top of the spec
-activates the manual mock, which exposes `mockSend`, `mockSqsSend`, and
-`resetSqsMock` helpers for per-test assertion and reset.
+`sqs-consumer` does not expose `handleMessage` as a public field; the property
+name has drifted across versions. Tests use:
 
----
+```ts
+function getInternalHandle(consumer: any) {
+  return consumer._sqsOptions?.handleMessage
+      ?? consumer.sqsOptions?.handleMessage
+      ?? consumer.options?.handleMessage;
+}
+```
 
-## Files
+This lets a test invoke the closure directly with a synthetic `Message` instead
+of running the polling loop. If a future `sqs-consumer` upgrade renames the
+field again, `getInternalHandle` is the single place to fix.
 
-### `index.spec.ts`
-
-Unit coverage of `src/queue.ts` via `getQueue(...)`. Describe blocks:
-
-1. **JSON parse error (no DLQ configured)** — rethrows on unparseable body, handler never invoked.
-2. **Parse failure DLQ routing** — unparseable body routes to `config.deadLetter` with
-   `ErrorDetail: "Invalid JSON: <reason>"` and preserved `MessageAttributes`
-   (incl. `CorrelationId`); publish failure on DLQ rethrows.
-3. **DLQ routing (payment-serv config pattern)** — handler-thrown `deadLetter=true`
-   publishes to DLQ with `ErrorDetail` + `CorrelationId`, ACKs original; `deadLetter`
-   string override routes to named queue; missing DLQ config logs + rethrows; DLQ
-   publish fail rethrows.
-4. **Consumer message attribute names** — `CorrelationId` + `ErrorDetail` always
-   requested; caller attrs merged without dropping library defaults.
-5. **publish() CorrelationId pass-through** — forwards `CorrelationId` when provided;
-   does NOT inject when omitted.
-6. **reject()** — throws with `deadLetter=true` and integrates with DLQ routing.
-
-**Internal handle access**: `sqs-consumer` stores `handleMessage` on
-`_sqsOptions` / `sqsOptions` / `options` depending on version. Tests use
-`getInternalHandle(consumer)` to invoke it directly without starting a poller.
-
----
-
-## Patterns
-
-- Tests use the Jest manual mock — no real SQS connection, no network, no containers.
-- `afterEach` calls `resetSqsMock()` to clear mock state between tests.
-- Consumer always stopped (`consumer.stop()`) before test ends to release sqs-consumer internals.
-- For DLQ failure-injection tests, swap the mocked `send` via `mockSqsSend(jest.fn().mockRejectedValue(...))`.
+Each test calls `consumer.stop()` after invoking the handle so the internal
+poller-promise machinery releases.
