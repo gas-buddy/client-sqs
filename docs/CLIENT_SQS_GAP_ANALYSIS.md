@@ -19,7 +19,7 @@ in the new client, and specifies what payment-serv needs to address.
 | Failure reason metadata on DLQ | ✅ `ErrorDetail` attribute added | ❌ Not implemented | **Critical — see Gap 3** |
 | Explicit nack / reject with reason | ✅ `req.gb.sqs.reject(reason)` | ❌ No method | **Critical — see Gap 4** |
 | Message compression | ✅ `compression: true` option | ❌ Not supported | Minor for payment-serv |
-| Silent message discard on parse error | ✅ Routes to DLQ | ⚠️ Logs error, silently acks | **Operational — see Gap 5** |
+| Silent message discard on parse error | ✅ Routes to DLQ | ✅ Routes to `config.deadLetter` with `ErrorDetail` (v1.1.0-beta.2) | Resolved — see Gap 5 |
 | Multi-reader concurrency | ✅ `readers` config per queue | ✅ Via `sqs-consumer` options | None |
 | IAM role validation at startup | ✅ `assumedRole` | ✅ `requiredRole` | None (renamed) |
 | Auto account ID / region discovery | ✅ EC2 metadata | ✅ EC2 metadata | None |
@@ -220,7 +220,7 @@ default:
 A message with an invalid JSON body was treated as permanently unprocessable and routed to
 the DLQ.
 
-**v23 behaviour:**
+**v23 behaviour (original, pre-v1.1.0):**
 `queue.js` (line 33–37):
 ```javascript
 try {
@@ -242,13 +242,84 @@ message is permanently lost — not retried, not DLQ'd.
 - No way for AAs to inspect or replay them
 - Potential data loss if a producer has a serialisation bug
 
-**Fix needed in client-sqs:**
-If JSON parsing fails, throw the error (or route to DLQ) rather than continuing with
-`parsed = undefined`.
+---
 
-**Workaround in payment-serv:**
-None available at the application level — this is inside `client-sqs`'s `handleMessage`.
-This requires a fix in `client-sqs`.
+#### Resolution — v1.1.0-beta.1 (partial) and v1.1.0-beta.2 (complete)
+
+**v1.1.0-beta.1** closed the silent-ack regression: parser now throws, `sqs-consumer`
+leaves the message visible, and AWS-native `RedrivePolicy` (if configured at the AWS
+level) eventually routes the poison message to a DLQ. **However**, that AWS-native
+redrive path does not attach the `ErrorDetail` attribute the library otherwise
+guarantees. Only messages rejected via `reject(reason)` / `err.deadLetter = true` got
+`ErrorDetail`. Parse-failure DLQ messages therefore landed without the context an
+operator needs to triage them, breaking the invariant advertised in `README.md` and
+`CLAUDE.md`.
+
+**v1.1.0-beta.2** routes parse failures through the same `publishToDeadLetter()` helper
+the library already used for handler-thrown `deadLetter` errors. Behaviour now:
+
+- `config.deadLetter` set → publish raw body to DLQ with
+  `ErrorDetail: "Invalid JSON: <reason>"` and the original `MessageAttributes` (incl.
+  `CorrelationId`); ACK source.
+- `config.deadLetter` unset → rethrow (preserves beta.1 behaviour; AWS-native
+  `RedrivePolicy` may take over, but without `ErrorDetail`).
+- DLQ publish itself fails → rethrow so source stays visible (do not ACK a message we
+  failed to archive).
+
+The invariant *every DLQ message has `ErrorDetail`* is now encoded in a single helper
+shared by both branches.
+
+See `src/queue.ts` (`publishToDeadLetter` + parse-failure branch in `handleMessage`) and
+`__tests__/index.spec.ts` (suite *Parse failure DLQ routing*).
+
+#### End-to-end verification (payment-serv + LocalStack, 2026-05-04)
+
+**Setup:** payment-serv on v23, LocalStack, main queue `payment_dwolla_webhooks` + DLQ
+`payment_dwolla_webhooks_unprocessable`, `deadLetter: "payment_dwolla_webhooks_unprocessable"`.
+
+*Scenario A — handler `reject()` (Gap 4 path).* Unknown-topic Dwolla message →
+`dwollaNotification` calls `queue.reject('Unhandled Dwolla event: ...')`.
+
+DLQ message:
+```json
+{
+  "Body": "{\"topic\":\"totally_unknown_gap4\",...}",
+  "MessageAttributes": {
+    "CorrelationId": { "StringValue": "gap4-manual-1777934661", "DataType": "String" },
+    "ErrorDetail":   { "StringValue": "Unhandled Dwolla event: totally_unknown_gap4",
+                       "DataType": "String" }
+  },
+  "Attributes": { "ApproximateReceiveCount": "1" }
+}
+```
+✅ `ErrorDetail` + `CorrelationId` preserved; single explicit publish (no redrive).
+
+*Scenario B — malformed JSON (the gap).* Body `not-json-at-all-}{broken` published to main queue.
+
+- **beta.1:** parser throws, `sqs-consumer` leaves the message visible, loops forever
+  unless AWS-native redrive is configured. With redrive enabled, the DLQ message has
+  `ApproximateReceiveCount=3`, `DeadLetterQueueSourceArn` set, and **no `ErrorDetail`,
+  no `CorrelationId`** — invariant broken.
+- **beta.2:** library publishes directly:
+  ```json
+  {
+    "Body": "not-json-at-all-}{broken",
+    "MessageAttributes": {
+      "CorrelationId": { "StringValue": "gap5-parsefail-1777936363", "DataType": "String" },
+      "ErrorDetail":   { "StringValue": "Invalid JSON: Unexpected token o in JSON at position 1",
+                         "DataType": "String" }
+    },
+    "Attributes": { "ApproximateReceiveCount": "1" }
+  }
+  ```
+  ✅ `ErrorDetail` + `CorrelationId` preserved; no dependency on AWS-native `RedrivePolicy`.
+
+**payment-serv side:** no consumer code change needed — `sqs-subscriptions.ts`
+`wrapHandler()` and handler `reject()` sites are unchanged. Jest coverage in
+`__tests__/sqs_reject_paths.spec.ts` + `sqs_wrap_handler.spec.ts` +
+`sqs_job_routing.spec.ts` (payment-serv commit `23440295`) locks Scenario A at the
+handler level; end-to-end Scenarios A + B verified manually against LocalStack as
+recorded above.
 
 ---
 
@@ -260,7 +331,7 @@ This requires a fix in `client-sqs`.
 |---|---|
 | **High** | Implement DLQ routing when `error.deadLetter` is set (remove the TODO) |
 | **High** | Add `ErrorDetail` + `CorrelationId` attributes when routing to DLQ |
-| **High** | Fix silent ack on JSON parse error — throw or DLQ instead |
+| ~~**High**~~ Resolved (v1.1.0-beta.2) | ~~Fix silent ack on JSON parse error — throw or DLQ instead~~ Parse failures now route through `publishToDeadLetter()` with `ErrorDetail: "Invalid JSON: …"` and preserved `MessageAttributes` |
 | **Medium** | Add `reject(reason)` / `nack(reason)` method to queue interface |
 | **Medium** | Propagate `CorrelationId` message attribute into handler context |
 
