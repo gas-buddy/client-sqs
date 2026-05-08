@@ -12,7 +12,7 @@ export interface SQSQueueConfiguration {
   // The true name of the queue on the endpoint, else uses the name in the queue configuration
   // dictionary
   name?: string;
-  // Identify a queue to receive rejected messages
+  // Identify a queue to receive rejected messages (SQS queue name, not a config key)
   deadLetter?: string;
   // How many readers to spin up when subscribing to this queue
   readers?: number;
@@ -45,16 +45,22 @@ export interface SQSEnhancedQueue<CTX extends SQSClientContext = SQSClientContex
 
   publish<T extends {}>(
     message: T,
-    options?: SendMessageCommandInput,
+    options?: Partial<SendMessageCommandInput>,
   ): Promise<SendMessageCommandOutput>;
   createConsumer<T extends {} = {}>(
     handler: (context: CTX, message: T, original: Message) => Promise<void> | void,
-    options?: ConsumerOptions,
+    options?: Omit<ConsumerOptions, 'queueUrl'>,
   ): Consumer;
   receive<T extends {} = {}>(
     options: Omit<ReceiveMessageCommandInput, 'QueueUrl'> & { noParse?: boolean },
   ): Promise<{ message?: T; original: Message }[]>;
   ack(message: Message): Promise<void>;
+  /**
+   * Throw a dead-letter error. The message will be routed to the configured
+   * `deadLetter` queue with the reason set as the `ErrorDetail` attribute.
+   * Equivalent to: `throw Object.assign(new Error(reason), { deadLetter: true })`
+   */
+  reject(reason: string): never;
 }
 
 export interface SQSEnhancedQueueClient<

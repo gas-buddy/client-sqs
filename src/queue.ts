@@ -22,9 +22,36 @@ export async function getQueue(
   const qurl = (ep.config.endpoint as string) || `http://${ep.region}.queue.amazonaws.com`;
   const fullUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${name}`;
 
+  // Publish a message to the configured DLQ with an ErrorDetail attribute and preserve the
+  // original MessageAttributes (e.g. CorrelationId). Shared by both the parse-failure branch
+  // and the handler-thrown `deadLetter` branch so every DLQ'd message carries ErrorDetail.
+  async function publishToDeadLetter(
+    message: Message,
+    dlqName: string,
+    reason: string,
+  ): Promise<void> {
+    const dlqUrl = `${qurl}${qurl.endsWith('/') ? '' : '/'}${ep.accountId}/${dlqName}`;
+    await ep.sqs.send(new SendMessageCommand({
+      QueueUrl: dlqUrl,
+      MessageBody: message.Body!,
+      MessageAttributes: {
+        ...message.MessageAttributes,
+        ErrorDetail: {
+          DataType: 'String',
+          StringValue: reason,
+        },
+      },
+    }));
+  }
+
   return {
     name: localName,
     url: fullUrl,
+    /**
+     * Publish a message to this queue.
+     * Pass `MessageAttributes` in options to forward metadata (e.g. CorrelationId) — the library
+     * does NOT auto-generate or inject a CorrelationId. That is the caller's responsibility.
+     */
     async publish<T extends {}>(message: T, options?: Partial<SendMessageCommandInput>) {
       const command = new SendMessageCommand({
         ...options,
@@ -35,38 +62,75 @@ export async function getQueue(
     },
     createConsumer<T extends {}>(
       handler: (context: SQSClientContext, message: T, original: Message) => Promise<void> | void,
-      options: ConsumerOptions,
+      options: Omit<ConsumerOptions, 'queueUrl'> = {},
     ) {
+      const { messageAttributeNames: callerAttrs = [], ...restOptions } = options;
       const consumer = new Consumer({
-        ...options,
+        ...restOptions,
         region: ep.region,
         queueUrl: fullUrl,
         sqs: ep.sqs,
+        // Request CorrelationId, ErrorDetail, and any caller-specified attributes.
+        // attributeNames: ['All'] fetches SQS system attributes (ApproximateReceiveCount, etc.)
+        messageAttributeNames: ['CorrelationId', 'ErrorDetail', ...callerAttrs],
+        attributeNames: ['All'],
         async handleMessage(message) {
+          let parsed: T;
           try {
-            let parsed: T | undefined;
+            parsed = JSON.parse(message.Body!) as T;
+          } catch (e) {
+            context.logger.error(e, 'Invalid JSON in SQS message');
+            // Route parse failures through the same DLQ publish path as handler-thrown
+            // `deadLetter` errors so every DLQ message carries ErrorDetail (and any original
+            // MessageAttributes such as CorrelationId). When no DLQ is configured, preserve
+            // the prior behaviour: rethrow so sqs-consumer leaves the message visible and any
+            // AWS-native RedrivePolicy takes over.
+            if (!config.deadLetter) {
+              throw e;
+            }
             try {
-              parsed = JSON.parse(message.Body!) as T;
-            } catch (e) {
-              context.logger.error(e, 'Invalid JSON in SQS message');
+              await publishToDeadLetter(
+                message,
+                config.deadLetter,
+                `Invalid JSON: ${String((e as Error).message ?? e)}`,
+              );
+              // ACK original by returning message
+              return message;
+            } catch (sqsError) {
+              context.logger.error(
+                sqsError,
+                'Failed to publish parse-failure to configured DLQ',
+              );
+              throw sqsError;
             }
-            if (parsed) {
-              await handler(context, parsed, message);
-            }
-            // This is what causes it to ack the message
+          }
+          try {
+            await handler(context, parsed, message);
+            // Returning message causes sqs-consumer to delete (ack) it
             return message;
           } catch (error) {
-            if ((error as any).deadLetter) {
-              if (!config.deadLetter) {
+            const err = error as any;
+            if (err.deadLetter) {
+              const dlqName: string | undefined = err.deadLetter === true
+                ? config.deadLetter : err.deadLetter;
+              if (!dlqName) {
                 context.logger.error(
-                  error,
+                  err,
                   'SQS deadLetter error, but no deadLetter queue configured',
                 );
+              } else {
+                try {
+                  await publishToDeadLetter(message, dlqName, String(err.message ?? err));
+                  // ACK original by returning message
+                  return message;
+                } catch (sqsError) {
+                  context.logger.error(sqsError, 'Failed to publish to configured DLQ');
+                  throw sqsError;
+                }
               }
-              // TODO dead letter handling
             }
-            context.logger.error(error, 'SQS Consumer handler error');
-            throw error;
+            context.logger.error(err, 'SQS Consumer handler error');
+            throw err;
           }
         },
       });
@@ -111,6 +175,11 @@ export async function getQueue(
         ReceiptHandle: message.ReceiptHandle!,
       });
       await ep.sqs.send(command);
+    },
+    reject(reason: string): never {
+      const e = new Error(reason);
+      (e as any).deadLetter = true;
+      throw e;
     },
   };
 }
